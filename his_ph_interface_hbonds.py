@@ -1,26 +1,22 @@
 #!/usr/bin/env python
 from __future__ import division
 
-# This program accepts arguments like this:
-
-#./remove_superfluous_trp.py pdb1.pdb pdb2.pdb pdb3.pdb
-# or
-#./remove_superfluous_trp.py -in:file:silent my.silent
+# Scores pH sensitivity of a binder:target complex that contains HIS (low vs. high pH h-bonds, ddG, salt bridges).
+#
+# Usage: ./his_ph_interface_hbonds.py pdb1.pdb pdb2.pdb [--replicates N] [--low_ph_same_rotamers] [--never_pack]
+#    or: ./his_ph_interface_hbonds.py -in:file:silent my.silent [--replicates N] [--low_ph_same_rotamers] [--never_pack]
 
 import os
 import sys
 import math
 
-import distutils.spawn
 import os
 import sys
-#sys.path.append(os.path.dirname(distutils.spawn.find_executable("silent_tools.py")))
 #import silent_tools
 
 from pyrosetta import *
 from pyrosetta.rosetta import *
 
-sys.path.append("/home/bcov/sc/random/npose")
 import npose_util_pyrosetta as nup
 import npose_util as nu
 
@@ -33,17 +29,18 @@ import subprocess
 import time
 import re
 
-def _hbedge_from_lowmem(hb_graph, lowmem_edge):
-    if hasattr(hb_graph, 'HBondEdge_from_LowMemEdge'):
-        return hb_graph.HBondEdge_from_LowMemEdge(lowmem_edge)
-    return core.scoring.hbonds.graph.HBondEdge_from_LowMemEdge(lowmem_edge)
-
 # import pyRMSD.RMSDCalculator
 
 init("-beta_nov16 -in:file:silent_struct_type binary -keep_input_scores false -mute all"
     " -holes:dalphaball /work/tlinsky/Rosetta/main/source/external/DAlpahBall/DAlphaBall.macgcc"
-    " -ex1 -ex2"
     )
+
+# setup pH mode
+basic.options.set_boolean_option('pH:pH_mode', True)
+pose = pose_from_sequence('H')
+scorefxn = get_fa_scorefxn()
+protocols.toolbox.pose_manipulation.repack_this_residue(1, pose, scorefxn)
+basic.options.set_boolean_option('pH:pH_mode', False)
 
 
 
@@ -51,6 +48,9 @@ init("-beta_nov16 -in:file:silent_struct_type binary -keep_input_scores false -m
 parser = argparse.ArgumentParser()
 parser.add_argument("-in:file:silent", type=str, default="")
 parser.add_argument("pdbs", type=str, nargs="*")
+parser.add_argument("--replicates", type=int, default=1)
+parser.add_argument("--low_ph_same_rotamers", action='store_true')
+parser.add_argument("--never_pack", action='store_true')
 
 
 args = parser.parse_args(sys.argv[1:])
@@ -65,7 +65,8 @@ scorefxn_fa_atr = core.scoring.ScoreFunctionFactory.create_score_function("none"
 scorefxn_fa_atr.set_weight(core.scoring.fa_atr, 1)
 
 scorefxn_none = core.scoring.ScoreFunctionFactory.create_score_function("none")
-
+scorefxn_elec = core.scoring.ScoreFunctionFactory.create_score_function("none")
+scorefxn_elec.set_weight(core.scoring.fa_elec, 1)
 
 
 chainA = core.select.residue_selector.ChainSelector("A")
@@ -822,16 +823,7 @@ def classify_binder_pos(pose, any_ddg_is_interface=False):
     return pose_df
 
 
-
-
-
-the_locals = None
-
-def worst_possible_asp(pose, name_no_suffix, out_score_map, out_string_map, suffix):
-
-    monomer_size = pose.conformation().chain_end(1)
-
-
+def get_simple_is_core(pose):
 
     sc_neighbors = core.select.util.SelectResiduesByLayer()
     sc_neighbors.use_sidechain_neighbors( True )
@@ -840,139 +832,455 @@ def worst_possible_asp(pose, name_no_suffix, out_score_map, out_string_map, suff
     for seqpos in range(1, pose.size()+1):
         is_core.append( sc_neighbors.rsd_sasa(seqpos) > 4)
 
-
-    scorefxn_sc = core.scoring.ScoreFunctionFactory.create_score_function("none")
-    scorefxn_sc.set_weight(core.scoring.hbond_bb_sc, 1)
-    scorefxn_sc.set_weight(core.scoring.hbond_sc, 1)
-
-    scorefxn_bb = core.scoring.ScoreFunctionFactory.create_score_function("none")
-    scorefxn_bb.set_weight(core.scoring.hbond_sr_bb, 1)
-    scorefxn_bb.set_weight(core.scoring.hbond_lr_bb, 1)
-
-    tf = core.pack.task.TaskFactory()
-
-    repack_aa = core.pack.task.operation.RestrictToRepackingRLT()
-    subset = chainB.apply(pose)
-    tf.push_back( core.pack.task.operation.OperateOnResidueSubset( repack_aa, subset ) )
-
-    restrict_aa = core.pack.task.operation.RestrictAbsentCanonicalAASRLT()
-    restrict_aa.aas_to_keep( 'H' )
-    subset = chainA.apply(pose)
-    tf.push_back( core.pack.task.operation.OperateOnResidueSubset( restrict_aa, subset ) )
-
-    tf.push_back(core.pack.task.operation.InitializeFromCommandline())
-
-    task = tf.create_task_and_apply_taskoperations( pose )
-
-    scorefxn(pose)
-    scorefxn.setup_for_packing( pose, task.repacking_residues(), task.designing_residues() )
-    graph = core.pack.create_packer_graph( pose, scorefxn, task )
-
-    rotsets = core.pack.rotamer_set.RotamerSets()
-    rotsets.set_task( task )
-    rotsets.initialize_pose_for_rotsets_creation( pose )
-    rotsets.build_rotamers( pose, scorefxn, graph )
+    return is_core
 
 
-    complete_rotamer_sets = core.pack.rotamer_set.RotamerSets()
-    position_had_rotset = utility.vector1_bool()
+def protonate_histidines(pose, do_protonate=True):
 
-    hb_graph = core.pack.hbonds.hbond_graph_from_partial_rotsets(pose, rotsets, scorefxn_sc, scorefxn_bb, complete_rotamer_sets, position_had_rotset, -0.01)
+    pH = 0 if do_protonate else 14
+
+    basic.options.set_boolean_option('pH:pH_mode', True)
+    basic.options.set_real_option('pH:value_pH', pH)
+
+    scorefxn_pH = core.scoring.ScoreFunctionFactory.create_score_function("none")
+    scorefxn_pH.set_weight(core.scoring.e_pH, 100)
+
+    his_sel = core.select.residue_selector.ResidueNameSelector()
+    his_sel.set_residue_name3("HIS")
+
+    his_sub = his_sel.apply(pose)
+
+    protocols.toolbox.pose_manipulation.repack_these_residues(his_sub, pose, scorefxn_pH)
+
+    protonated_his_check(pose, do_protonate)
+
+    basic.options.set_boolean_option('pH:pH_mode', False)
+    basic.options.set_real_option('pH:value_pH', 7)
 
 
-    assert np.all(position_had_rotset)
-    assert rotsets.nrotamers() == hb_graph.num_nodes()
+def protonated_his_check(pose, do_protonate):
+    his_sel = core.select.residue_selector.ResidueNameSelector()
+    his_sel.set_residue_name3("HIS")
 
-    seqpos_has_his = np.zeros(pose.size()+1, dtype=bool)
-
-    core_bb_acc = set()
-    core_sc_acc = set()
-    surf_bb_acc = set()
-    surf_sc_acc = set()
-
-    for ihbnode in range(1, hb_graph.num_nodes()+1):
-
-        hbnode = hb_graph.get_node(ihbnode)
-        seqpos = rotsets.res_for_rotamer(ihbnode)
-        rotamer = rotsets.rotamer(ihbnode)
-
-
-        if seqpos > monomer_size:
+    his_sub = his_sel.apply(pose)
+    for seqpos in range(1, pose.size()+1):
+        if not his_sub[seqpos]:
             continue
+        if do_protonate:
+            assert '_P' in pose.residue(seqpos).name(), 'Protonation failed. Do you have -pH_mode True?'
+        else:
+            assert '_P' not in pose.residue(seqpos).name(), 'Deprotonation failed. Do you have -pH_mode True?'
 
-        it = hbnode.edge_list_begin( hb_graph )
-        while it.valid():
-            edge = _hbedge_from_lowmem(hb_graph, it.dereference())
-            it.pre_increment()
 
-            we_are_first = edge.get_first_node_ind() == ihbnode
-
-            other_node = edge.get_second_node_ind() if we_are_first else edge.get_first_node_ind()
-            assert other_node != ihbnode
-            other_seqpos = rotsets.res_for_rotamer(other_node)
-            other_rotamer = rotsets.rotamer(other_node)
-
-            if other_seqpos <= monomer_size:
-                continue
-
-            for hbond in edge.hbonds():
-
-                we_are_donor = not (we_are_first ^ hbond.first_node_is_donor())
-
-                if we_are_donor:
+def drop_reslabel(pose, label_re):
+    compiled = re.compile(label_re)
+    for seqpos in range(1, pose.size()+1):
+        labels = pose.pdb_info().get_reslabels(seqpos)
+        if ( len(labels) == 0 ):
+            continue
+        keep_mask = []
+        for label in labels:
+            if ( compiled.match(label) ):
+                keep_mask.append(False)
+            else:
+                keep_mask.append(True)
+        if ( not np.all(keep_mask) ):
+            pose.pdb_info().clear_reslabel(seqpos)
+            for label, keep in zip(labels, keep_mask):
+                if ( not keep ):
                     continue
-
-                our_iatom = hbond.local_atom_id_A()
-                their_iatom = hbond.local_atom_id_D()
-
-                if rotamer.atom_is_backbone(our_iatom):
-                    continue
-
-                their_bb = other_rotamer.atom_is_backbone(their_iatom)
-                we_core = is_core[seqpos]
-
-                if their_bb and we_core:
-                    core_bb_acc.add(seqpos)
-                if their_bb and not we_core:
-                    surf_bb_acc.add(seqpos)
-                if not their_bb and we_core:
-                    core_sc_acc.add(seqpos)
-                if not their_bb and not we_core:
-                    surf_sc_acc.add(seqpos)
+                pose.pdb_info().add_reslabel(seqpos, label)
 
 
-                # break
+def calc_ph_score(df):
 
-        #     break
+    return (
+       -1.0 * df['low_pH_surf_D'] + 
+       -3.0 * df['low_pH_surf_DD'] + 
+       -2.0 * df['low_pH_surf_D_bb'] + 
+       -6.0 * df['low_pH_surf_DD_bb'] + 
+       -3.0 * df['low_pH_core_D'] + 
+       -9.0 * df['low_pH_core_DD'] + 
+       -6.0 * df['low_pH_core_D_bb'] + 
+       -18.0 * df['low_pH_core_DD_bb'] + 
+
+        1.0 * df['high_pH_surf_A'] + 
+        1.0 * df['high_pH_surf_D'] + 
+        3.0 * df['high_pH_surf_AD'] + 
+        2.0 * df['high_pH_surf_A_bb'] + 
+        2.0 * df['high_pH_surf_D_bb'] + 
+        6.0 * df['high_pH_surf_AD_bb'] +
+
+        3.0 * df['high_pH_core_A'] + 
+        3.0 * df['high_pH_core_D'] + 
+        9.0 * df['high_pH_core_AD'] + 
+        6.0 * df['high_pH_core_A_bb'] + 
+        6.0 * df['high_pH_core_D_bb'] + 
+        18.0 * df['high_pH_core_AD_bb'] 
+
+        )
 
 
-        # if it.valid():
-        #     break
+def calc_ddg_norepack(pose, scorefxn):
+    pose = pose.clone()
+    
+    close_score = scorefxn(pose)
+    ce_close = interface_energy(pose, scorefxn)
+    pose = move_chainA_far_away(pose)
+    far_score = scorefxn(pose)
+    ce_far = interface_energy(pose, scorefxn)
 
-    labels_and_sets = [
-    ('core_bb_acc', core_bb_acc),
-    ('surf_bb_acc', surf_bb_acc),
-    ('core_sc_acc', core_sc_acc),
-    ('surf_sc_acc', surf_sc_acc),
-    ]
+    ddg = close_score - far_score
+    ce_ddg = ce_close - ce_far
 
+    #assert abs(ddg - ce_ddg) < 0.1
+
+    return ddg
+
+
+
+def interface_energy(pose, scorefxn, charge_only=False, charge_his_only=False):
+
+    weights = scorefxn.weights()
+    gr = pose.energies().energy_graph()
+    monomer_size = pose.conformation().chain_end(1)
+    dg = 0
     for seqpos in range(1, monomer_size+1):
-        labels = []
-        for label, sett in labels_and_sets:
-            if seqpos in sett:
-                labels.append(label)
+        name1 = pose.residue(seqpos).name1()
+        for seqpos2 in range(monomer_size+1, pose.size()+1):
+            name2 = pose.residue(seqpos2).name1()
 
-        if len(labels) > 0:
-            print(f"Seqpos {seqpos:3d}: PDB {pose.pdb_info().number(seqpos):3d}: {' '.join(labels)}")
+            if charge_only:
+                if name1 not in 'DERKH':
+                    continue
+                if name2 not in 'DERKH':
+                    continue
+            if charge_his_only:
+                good = False
+                if name1 in 'DERKH' and name2 == 'H':
+                    good = True
+                if name2 in 'DERKH' and name1 == 'H':
+                    good = True
+                if not good:
+                    continue
 
 
-    for label, sett in labels_and_sets:
-        value = '+'.join([str(x) for x in sorted(list(sett))])
-        if len(value) == 0:
-            value = 'None'
+            edge = gr.find_edge(seqpos, seqpos2)
+            if not edge:
+                continue
+            dg += edge.dot(weights)
 
-        out_string_map[label] = value
+    return dg
 
+
+def calc_ddg_norepack_charge_only(pose, scorefxn, charge_only=False, charge_his_only=False):
+    pose = pose.clone()
+    
+    scorefxn(pose)
+    close_score = interface_energy(pose, scorefxn, charge_only=charge_only, charge_his_only=charge_his_only )
+    pose = move_chainA_far_away(pose)
+    scorefxn(pose)
+    far_score = interface_energy(pose, scorefxn, charge_only=charge_only, charge_his_only=charge_his_only )
+
+    return close_score - far_score
+
+
+def mean_reject_edges(array):
+    if len(array) < 3:
+        return np.mean(array)
+    else:
+        return np.mean(list(sorted(list(array)))[1:-1])
+
+
+
+def rotamer_charged_atoms(rotamer):
+    name1 = rotamer.name1()
+    atoms = None
+    if ( name1 == "D" ):
+        atoms = ['OD1', 'OD2']
+    if ( name1 == "E" ):
+        atoms = ['OE1', 'OE2']
+    if ( name1 == "K" ):
+        atoms = ['NZ']
+    if ( name1 == "R" ):
+        atoms = ['NE', 'NH1', 'NH2']
+    if ( name1 == "H" ):
+        atoms = [rotamer.atom_name(x).strip() for x in range(rotamer.first_sidechain_atom(), rotamer.nheavyatoms()+1) 
+                                                                            if rotamer.atom_name(x).strip().startswith('N')]
+    assert( not atoms is None)
+
+    xyzs = np.zeros((len(atoms), 3))
+    for i in range(len(atoms)):
+        xyzs[i] = from_vector(rotamer.xyz(atoms[i]))
+    return xyzs
+
+def from_vector(xyz_vector):
+    return np.array([xyz_vector.x, xyz_vector.y, xyz_vector.z])
+
+def get_CBs(pose):
+    CBs = []
+    for seqpos in range(1, pose.size()+1):
+        CBs.append(from_vector(pose.residue(seqpos).nbr_atom_xyz()))
+    CBs = np.array(CBs)
+    return CBs
+
+
+def get_salt_score(pose, salt_weight=-2, low_pH=False):
+
+    CBs = get_CBs(pose)
+
+    monomer_size = pose.conformation().chain_end(1)
+    salt_ddg = 0
+    for seqpos in range(1, monomer_size+1):
+        salt_ddg += salt_weight * get_salt_score_ind(pose, seqpos, CBs, low_pH=low_pH)
+
+    return salt_ddg
+
+def get_salt_score_ind(pose, seqpos, CBs, low_pH=False):
+    sequence = pose.sequence()
+
+    monomer_size = pose.conformation().chain_end(1)
+    is_target = np.zeros(pose.size(), bool)
+    is_target[monomer_size:] = True
+
+    main_letter = pose.residue(seqpos).name1()
+    charge_letters = 'DERKH' if low_pH else 'DERK'
+    if ( main_letter not in charge_letters ):
+        return 0
+
+    we_are_negative = main_letter in "DE"
+
+    cb_dist_from_us = np.linalg.norm( CBs - CBs[seqpos-1], axis=-1 )
+    close_enough_to_count = cb_dist_from_us < 16
+
+    if ( we_are_negative ):
+        ok_letter = (np.array(list(sequence)) == "K") | (np.array(list(sequence)) == "R") | (np.array(list(sequence)) == "H")
+        is_potential_partner = is_target & close_enough_to_count & ok_letter
+
+        anti_letter = (np.array(list(sequence)) == "D") | (np.array(list(sequence)) == "E")
+        is_anti_partner = is_target & close_enough_to_count & anti_letter
+    else:
+        ok_letter = (np.array(list(sequence)) == "D") | (np.array(list(sequence)) == "E")
+        is_potential_partner = is_target & close_enough_to_count & ok_letter
+
+        anti_letter = (np.array(list(sequence)) == "R") | (np.array(list(sequence)) == "K") | (np.array(list(sequence)) == "H")
+        is_anti_partner = is_target & close_enough_to_count & anti_letter
+
+
+    our_atoms = rotamer_charged_atoms(pose.residue(seqpos))
+
+    partners = np.concatenate((np.where(is_potential_partner)[0]+1, -(np.where(is_anti_partner)[0]+1)))
+
+    salt_before_weight = 0
+
+    for partner in partners:
+        multiplier = np.sign(partner)
+        partner = abs(partner)
+
+        their_atoms = rotamer_charged_atoms(pose.residue(partner))
+
+        closest = np.min(np.linalg.norm( our_atoms[:,None] - their_atoms[None,:], axis=-1 ))
+
+        score = 0
+        if ( closest < 7 ):
+            score = 1
+        elif ( closest < 9 ):
+            score = 1 - (closest - 7) / (9 - 7)
+        else:
+            score = 0
+
+        salt_before_weight += score * multiplier
+
+    # if ( seqpos == 102 and main_letter == "R" ):
+    #     import IPython
+    #     IPython.embed()
+
+    # print("Salt before weight %.2f"%(salt_before_weight))
+    return salt_before_weight
+
+
+
+
+
+the_locals = None
+
+def worst_possible_asp(pose, name_no_suffix, out_score_map_real, out_string_map, suffix):
+
+
+    monomer_size = pose.conformation().chain_end(1)
+
+    is_core = get_simple_is_core(pose)
+
+    score_maps = []
+    for replicate in range(args.replicates):
+
+        out_score_map = {}
+        ddgs = []
+        salt_parts = []
+        ddgs_w_salt = []
+        ddg_elecs = []
+        ddg_elecs_charged = []
+        ddg_elecs_chargedH = []
+        net_charges = []
+
+        for low_pH in [False, True]:
+
+            pre_packed = pose.clone()
+            protonate_histidines(pose, low_pH)
+
+            if args.low_ph_same_rotamers and low_pH:
+                for seqpos in range(1, pose.size()):
+                    for chi in range(1, pose.residue(seqpos).nchi()+1):
+                        pose.set_chi(chi, seqpos, pre_packed.residue(seqpos).chi(chi))
+                for seqpos in range(1, pose.size()):
+                    for chi in range(1, pose.residue(seqpos).nchi()+1):
+                        assert np.isclose(pose.residue(seqpos).chi(chi), pre_packed.residue(seqpos).chi(chi))
+            else:
+                if not args.never_pack:
+                    rosetta_packer.beta_pack(pose, soft=True)
+
+            protonated_his_check(pose, low_pH)
+
+            scorefxn_hbonds(pose)
+            hbset = core.scoring.hbonds.HBondSet()
+            core.scoring.hbonds.fill_hbond_set(pose, False, hbset)
+            hbset.hbond_options().bb_donor_acceptor_check(False)
+            core.scoring.hbonds.fill_hbond_set(pose, False, hbset)
+
+            prefix = 'low_pH_'if low_pH else 'high_pH_'
+
+            cats = ['core_A', 'core_D', 'core_AD', 'surf_A', 'surf_D', 'surf_AD']
+            if low_pH:
+                cats = ['core_D', 'core_DD', 'surf_D', 'surf_DD']
+
+            cats2 = list(cats)
+            for cat in cats:
+                cats2.append(cat + '_bb')
+
+            for cat in cats2:
+                out_score_map[prefix + cat] = 0
+
+            for seqpos in range(1, pose.size()+1):
+                if pose.residue(seqpos).name1() != 'H':
+                    continue
+
+                we_are_binder = seqpos <= monomer_size
+
+                his_ACC = 0
+                his_DON = 0
+                cross_hbonds = 0
+                other_is_bb = False
+                atom_used = set()
+                for hbond in hbset.residue_hbonds(seqpos):
+                    we_are_don = hbond.don_res() == seqpos
+
+                    if we_are_don:
+                        if hbond.don_hatm_is_backbone():
+                            continue
+                        atom = hbond.don_hatm()
+                        to_bb = hbond.acc_atm_is_backbone()
+                    else:
+                        if hbond.acc_atm_is_backbone():
+                            continue
+                        atom = hbond.acc_atm()
+                        to_bb = hbond.don_hatm_is_backbone()
+
+                    # So ok, theoretically there could be a bug if the same atom is making a hbond to both the target
+                    #  and to the binder and the binder atom comes up first
+                    # But like... What are the odds?
+                    if atom in atom_used:
+                        continue
+                    atom_used.add(atom)
+
+                    if we_are_don:
+                        his_DON += 1
+                    else:
+                        his_ACC += 1
+
+                    if we_are_don:
+                        other_res = hbond.acc_res()
+                    else:
+                        other_res = hbond.don_res()
+
+                    other_is_binder = other_res <= monomer_size
+
+                    if we_are_binder != other_is_binder:
+                        cross_hbonds += 1
+                        other_is_bb = other_is_bb or to_bb
+
+                if cross_hbonds == 0:
+                    continue
+                if his_ACC + his_DON == 0:
+                    continue
+
+
+                assert his_ACC + his_DON <= 2
+
+                # this is actually sidechain neighbors
+                core_str = 'core_' if is_core[seqpos] else 'surf_'
+
+                ad_str = "A"*his_ACC + "D"*his_DON
+
+
+                cat = core_str + ad_str
+                if other_is_bb:
+                    cat += '_bb'
+                assert cat in cats2, f'How did we get {cat} with low_pH: {low_pH}'
+
+
+                print(f'{prefix} {seqpos:3d} {pose.pdb_info().chain(seqpos)} {cat:7s} cross hbonds: {cross_hbonds}')
+
+                assert prefix + cat in out_score_map
+                out_score_map[prefix + cat] += cross_hbonds
+
+
+            monomer_seq = pose.sequence()[:monomer_size]
+            net_charge = monomer_seq.count('R') + monomer_seq.count('K') - monomer_seq.count('D') - monomer_seq.count('E')
+            if low_pH:
+                net_charge += monomer_seq.count('H')
+
+            ddg_pose = pose.clone()
+            rosetta_packer.beta_pack(ddg_pose)
+            ddgs.append(calc_ddg_norepack(ddg_pose, scorefxn))
+            salt_parts.append(get_salt_score(ddg_pose))
+            ddgs_w_salt.append(ddgs[-1] + salt_parts[-1])
+            ddg_elecs.append(calc_ddg_norepack(ddg_pose, scorefxn_elec))
+            ddg_elecs_charged.append(calc_ddg_norepack_charge_only(ddg_pose, scorefxn_elec, charge_only=True))
+            ddg_elecs_chargedH.append(calc_ddg_norepack_charge_only(ddg_pose, scorefxn_elec, charge_his_only=True))
+            net_charges.append(net_charge)
+
+            # pose.dump_pdb(f"{low_pH}_pH.pdb")
+
+
+        ph_score = calc_ph_score(out_score_map)
+        out_score_map['ph_score'] = ph_score
+
+        out_score_map['ddg_soft_lowph_vs_high'] = ddgs[1] - ddgs[0]
+        out_score_map['ddg_soft_w_salt_lowph_vs_high'] = ddgs_w_salt[1] - ddgs_w_salt[0]
+        out_score_map['salt_part_lowph_vs_high'] = salt_parts[1] - salt_parts[0]
+        out_score_map['ddg_elec_lowph_vs_high'] = ddg_elecs[1] - ddg_elecs[0]
+        out_score_map['ddg_elec_lowph_vs_high_charged_only'] = ddg_elecs_charged[1] - ddg_elecs_charged[0]
+        out_score_map['ddg_elec_lowph_vs_high_charged_to_HIS_only'] = ddg_elecs_chargedH[1] - ddg_elecs_chargedH[0]
+        out_score_map['net_charge_lowph_vs_high'] = net_charges[1] - net_charges[0]
+
+        out_score_map['ddg_soft_highph'] = ddgs[0]
+        out_score_map['ddg_soft_lowph'] = ddgs[1]
+        out_score_map['ddg_soft_w_salt_highph'] = ddgs_w_salt[0]
+        out_score_map['ddg_soft_w_salt_lowph'] = ddgs_w_salt[1]
+        out_score_map['salt_part_highph'] = salt_parts[0]
+        out_score_map['salt_part_lowph'] = salt_parts[1]
+        out_score_map['net_charge_highph'] = net_charges[0]
+        out_score_map['net_charge_lowph'] = net_charges[1]
+
+
+        score_maps.append(out_score_map)
+
+    for key in score_maps[0]:
+        out_score_map_real[key] = mean_reject_edges([d[key] for d in score_maps])
+
+    print('pH SCORE:', out_score_map_real['ph_score'])
+    print('ddg_soft_lowph_vs_high: %5.1f ddg_elec_lowph_vs_high: %5.1f ddg_elec_lowph_vs_high_charged_only: %5.1f ddg_elec_lowph_vs_high_charged_to_HIS_only: %5.1f'%(out_score_map_real['ddg_soft_lowph_vs_high'], out_score_map_real['ddg_elec_lowph_vs_high'],
+        out_score_map_real['ddg_elec_lowph_vs_high_charged_only'], out_score_map_real['ddg_elec_lowph_vs_high_charged_to_HIS_only']))
 
 
 
@@ -1064,6 +1372,23 @@ for ipdb, pdb in enumerate(pdbs):
 
 # if ( silent != "" ):
 #     sfd_out.write_all("out.silent", False)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

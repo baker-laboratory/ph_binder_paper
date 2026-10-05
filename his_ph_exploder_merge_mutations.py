@@ -1,20 +1,17 @@
 #!/usr/bin/env python
 from __future__ import division
 
-# This program accepts arguments like this:
-
-#./remove_superfluous_trp.py pdb1.pdb pdb2.pdb pdb3.pdb
-# or
-#./remove_superfluous_trp.py -in:file:silent my.silent
+# Exploder step 6b (optional): merges two networks onto the original parent binder.
+#
+# Usage: ./his_ph_exploder_merge_mutations.py pdb1.pdb pdb2.pdb --original_pdb parent.pdb
+#    or: ./his_ph_exploder_merge_mutations.py -in:file:silent my.silent --original_pdb parent.pdb
 
 import os
 import sys
 import math
 
-import distutils.spawn
 import os
 import sys
-#sys.path.append(os.path.dirname(distutils.spawn.find_executable("silent_tools.py")))
 #import silent_tools
 
 from pyrosetta import *
@@ -28,7 +25,6 @@ def pyro():
 def ros():
     return pyrosetta.rosetta
 
-sys.path.append("/home/bcov/sc/random/npose")
 import npose_util_pyrosetta as nup
 import npose_util as nu
 
@@ -622,11 +618,11 @@ class RosettaPacker:
         self.scorefxn_insta_soft.set_weight(ros().core.scoring.fa_rep, 0.15)
 
 
-        self.scorefxn_none = ros().core.scoring.ScoreFunctionFactory().create_score_function("none")
-        self.scorefxn_atr = ros().core.scoring.ScoreFunctionFactory().create_score_function("none")
+        self.scorefxn_none = ros().core.scoring.ScoreFunctionFactory.create_score_function("none")
+        self.scorefxn_atr = ros().core.scoring.ScoreFunctionFactory.create_score_function("none")
         self.scorefxn_atr.set_weight(ros().core.scoring.fa_atr, 1)
         self.scorefxn_beta = pyro().get_fa_scorefxn()
-        self.scorefxn_beta_soft = ros().core.scoring.ScoreFunctionFactory().create_score_function("beta_nov16_soft")
+        self.scorefxn_beta_soft = ros().core.scoring.ScoreFunctionFactory.create_score_function("beta_nov16_soft")
 
 
     # pack with only dunbrack, vdw, and hbonds

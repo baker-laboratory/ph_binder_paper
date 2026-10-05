@@ -1,26 +1,22 @@
 #!/usr/bin/env python
 from __future__ import division
 
-# This program accepts arguments like this:
-
-#./remove_superfluous_trp.py pdb1.pdb pdb2.pdb pdb3.pdb
-# or
-#./remove_superfluous_trp.py -in:file:silent my.silent
+# Exploder step 6a (optional): threads known-good networks onto other backbones.
+#
+# Usage: ./his_ph_exploder_thread_mutations.py pdb1.pdb pdb2.pdb --mutation_thread_list networks.list
+#    or: ./his_ph_exploder_thread_mutations.py -in:file:silent my.silent --mutation_thread_list networks.list
 
 import os
 import sys
 import math
 
-import distutils.spawn
 import os
 import sys
-#sys.path.append(os.path.dirname(distutils.spawn.find_executable("silent_tools.py")))
 #import silent_tools
 
 from pyrosetta import *
 from pyrosetta.rosetta import *
 
-sys.path.append("/home/bcov/sc/random/npose")
 import npose_util_pyrosetta as nup
 import npose_util as nu
 
@@ -35,10 +31,12 @@ import re
 
 import pandas as pd
 
-def _hbedge_from_lowmem(hb_graph, lowmem_edge):
-    if hasattr(hb_graph, 'HBondEdge_from_LowMemEdge'):
+def _hbedge_from_lowmem(hb_graph, lowmem_edge, node_ind):
+    # The edge list iterates over LowMemEdges. We need the full HBondEdge (with the hbonds).
+    if hasattr(hb_graph, 'HBondEdge_from_LowMemEdge'):  # pyrosetta with the hbond graph patch
         return hb_graph.HBondEdge_from_LowMemEdge(lowmem_edge)
-    return core.scoring.hbonds.graph.HBondEdge_from_LowMemEdge(lowmem_edge)
+    # Published pyrosetta: look the full edge up from its two node indices
+    return hb_graph.find_edge(node_ind, lowmem_edge.get_other_ind(node_ind))
 
 # import pyRMSD.RMSDCalculator
 
@@ -813,7 +811,7 @@ def find_hbnet(pose, important_seqposs):
 
         it = hbnode.edge_list_begin( hb_graph )
         while it.valid():
-            edge = _hbedge_from_lowmem(hb_graph, it.dereference())
+            edge = _hbedge_from_lowmem(hb_graph, it.dereference(), ihbnode)
             it.pre_increment()
 
             we_are_first = edge.get_first_node_ind() == ihbnode

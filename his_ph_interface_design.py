@@ -1,18 +1,17 @@
 #!/usr/bin/env python
 from __future__ import division
 
-# This program accepts arguments like this:
-
-#./remove_superfluous_trp.py pdb1.pdb pdb2.pdb pdb3.pdb
-# or
-#./remove_superfluous_trp.py -in:file:silent my.silent
+# Interface pipeline: designs binders with HIS that h-bond the target, scored by pH sensitivity.
+# Needs the hacked ProteinMPNN (set RF_DIFFUSION_PATH).
+#
+# Usage: ./his_ph_interface_design.py pdb1.pdb pdb2.pdb [options]
+#    or: ./his_ph_interface_design.py -in:file:silent my.silent [options]
 
 
 import os
 import sys
 import math
 
-import distutils.spawn
 import os
 import sys
 
@@ -22,25 +21,29 @@ from pyrosetta.rosetta import *
 
 import functools
 
-sys.path.insert(0, "/apptainer_python_packages")
-
-sys.path.append("/home/bcov/sc/diffusion/st/24_04_12_tied_mpnn/rf_diffusion")
-import inference.bcov_hacks.hacked_protein_mpnn_run as hacked_protein_mpnn_run
+# ProteinMPNN is run in one of two ways:
+#  1. Stock ProteinMPNN as an external program. It is found through PROTEIN_MPNN_PATH (a clone of
+#      https://github.com/dauparas/ProteinMPNN) or a ProteinMPNN folder next to this script.
+#      Optionally set PROTEIN_MPNN_PYTHON to a python that has torch. See his_ph_interface_mpnn.py
+#  2. The author's hacked ProteinMPNN (inference/bcov_hacks/hacked_protein_mpnn_run.py in an rf_diffusion checkout), in-process.
+#      Set RF_DIFFUSION_PATH. It needs torch and openfold.
+# Stock ProteinMPNN wins if both are available.
+import his_ph_interface_mpnn
+hacked_protein_mpnn_run = None
+if his_ph_interface_mpnn.find_mpnn_path() is None and "-h" not in sys.argv and "--help" not in sys.argv:
+    if not os.environ.get("RF_DIFFUSION_PATH"):
+        sys.exit("Can't find ProteinMPNN. Set PROTEIN_MPNN_PATH to a clone of https://github.com/dauparas/ProteinMPNN")
+    sys.path.append(os.environ["RF_DIFFUSION_PATH"])
+    import inference.bcov_hacks.hacked_protein_mpnn_run as hacked_protein_mpnn_run
 
 import importlib
-importlib.reload(hacked_protein_mpnn_run)
 
 
-# sys.path.append("/home/bcov/sc/helical_bundles/attempt2/scripts")
-# import motif_stuff2
-
-# sys.path.append('/software/lab/silent_tools')
-# import silent_tools
 
 
-# sys.path.append("/home/bcov/sc/random/npose")
-# import npose_util_pyrosetta as nup
-# import npose_util as nu
+
+import npose_util_pyrosetta as nup
+import npose_util as nu
 
 import numpy as np
 from collections import defaultdict
@@ -56,10 +59,12 @@ import shlex
 
 import pandas as pd
 
-def _hbedge_from_lowmem(hb_graph, lowmem_edge):
-    if hasattr(hb_graph, 'HBondEdge_from_LowMemEdge'):
+def _hbedge_from_lowmem(hb_graph, lowmem_edge, node_ind):
+    # The edge list iterates over LowMemEdges. We need the full HBondEdge (with the hbonds).
+    if hasattr(hb_graph, 'HBondEdge_from_LowMemEdge'):  # pyrosetta with the hbond graph patch
         return hb_graph.HBondEdge_from_LowMemEdge(lowmem_edge)
-    return core.scoring.hbonds.graph.HBondEdge_from_LowMemEdge(lowmem_edge)
+    # Published pyrosetta: look the full edge up from its two node indices
+    return hb_graph.find_edge(node_ind, lowmem_edge.get_other_ind(node_ind))
 
 # import pyRMSD.RMSDCalculator
 
@@ -120,8 +125,6 @@ parser.add_argument("-force_seq_by_tag", type=str, default="")
 parser.add_argument("-pssm_by_tag", type=str, default="") # just a dictionary with seqpos then letter then value
 parser.add_argument("-pssm_multiplier", type=float, default=1)
 
-parser.add_argument("-hbnet_decoding_order", action='store_true')
-parser.add_argument("-hbnet_decoding_noninterface_first", action='store_true')
 parser.add_argument("-hbnet_lock_identities", action='store_true')
 parser.add_argument("-hbnet_lock_identities_strict", action='store_true')
 
@@ -190,7 +193,9 @@ if ( args.force_seq_by_tag != "" ):
     assert(len(force_seq_by_tag) > 0)
 
 def get_mpnn(design_chains='A'):
-    # import inference.bcov_hacks.hacked_protein_mpnn_run as hacked_protein_mpnn_run
+    if hacked_protein_mpnn_run is None:
+        return functools.partial(his_ph_interface_mpnn.run_stock_mpnn, design_chains)
+
     argparser = hacked_protein_mpnn_run.load_argparser()
     args = argparser.parse_args(shlex.split(f'--pdb_path_chains="{design_chains}" --out_folder ./ --path_to_model_weights= --omit_AAs C'))
 
@@ -1012,7 +1017,7 @@ def looping_filters(pose):
 
         interesting = from_us ^ to_us
 
-        who = np.zeros(len(from_us), np.int)
+        who = np.zeros(len(from_us), int)
         who[:] = -2
         who[~from_us] = im_in_helix[froms[~from_us]]
         who[~to_us] = im_in_helix[tos[~to_us]]
@@ -1416,7 +1421,7 @@ def get_hbond_decoding_order(pose, interface_first=True, strict_lock=False):
             # hb_map[other_seqpos, seqpos] += 1
 
 
-    hbond_locs = np.array(hbond_locs)
+    hbond_locs = np.array(hbond_locs).reshape(-1, 3)
     hb_close_dist = 5
 
     close_hbs = [0]
@@ -1554,7 +1559,7 @@ def find_his_positions(pose):
 
         it = hbnode.edge_list_begin( hb_graph )
         while it.valid():
-            edge = _hbedge_from_lowmem(hb_graph, it.dereference())
+            edge = _hbedge_from_lowmem(hb_graph, it.dereference(), ihbnode)
             it.pre_increment()
 
             we_are_first = edge.get_first_node_ind() == ihbnode
@@ -2217,27 +2222,17 @@ def get_poses_and_scores(in_pose, name_no_suffix, n_per_input=1):
 
 ##################################################
 
-    # decoding order
+    # hbnet locking
 
-    decoding_order = None
+    if args.hbnet_lock_identities or args.hbnet_lock_identities_strict:
 
-    if (args.hbnet_decoding_order or args.hbnet_decoding_noninterface_first 
-        or args.hbnet_lock_identities or args.hbnet_lock_identities_strict):
+        this_decoding_order, this_fixed_pos = get_hbond_decoding_order(in_pose, strict_lock=args.hbnet_lock_identities_strict)
 
-        this_decoding_order, this_fixed_pos = get_hbond_decoding_order(in_pose, interface_first=not args.hbnet_decoding_noninterface_first, 
-                                         strict_lock=args.hbnet_lock_identities_strict
-                                         )
-
-        if args.hbnet_decoding_order or args.hbnet_decoding_noninterface_first:
-            decoding_order = this_decoding_order[None,:]
-
-        if args.hbnet_lock_identities or args.hbnet_lock_identities_strict:
-
-            print("HBNet Locking:", this_fixed_pos)
-            if mpnn_fixed is None:
-                mpnn_fixed = {"A":this_fixed_pos}
-            else:
-                mpnn_fixed = {"A":list(set(this_fixed_pos) + set(mpnn_fixed['A']))}
+        print("HBNet Locking:", this_fixed_pos)
+        if mpnn_fixed is None:
+            mpnn_fixed = {"A":this_fixed_pos}
+        else:
+            mpnn_fixed = {"A":list(set(this_fixed_pos) | set(mpnn_fixed['A']))}
 
 
 
@@ -2267,7 +2262,6 @@ def get_poses_and_scores(in_pose, name_no_suffix, n_per_input=1):
 
     mpnn_seqs, mpnn_scores = mpnn(pdb_str, best_of_n=args.mpnn_seqs, return_all=True, sampling_temps=temps, bias_by_res_d=bias_by_res_d,
                                                                                                 fixed_pos_list_by_chain_d=mpnn_fixed,
-                                                                                                decoding_order=decoding_order,
                                                                                                 tied_positions_list=tied_positions_list
                                                                                                 # N_solve_cycles=args.mpnn_n_cycles,
                                                                                                 # single_chain=args.mpnn_single_chain

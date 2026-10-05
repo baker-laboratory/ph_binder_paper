@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+score.sc
+*.silent
+# example/test inputs and outputs, not an official example
+test_scripts/
+test_scripts2/

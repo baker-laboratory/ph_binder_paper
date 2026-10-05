@@ -1,26 +1,22 @@
 #!/usr/bin/env python
 from __future__ import division
 
-# This program accepts arguments like this:
-
-#./remove_superfluous_trp.py pdb1.pdb pdb2.pdb pdb3.pdb
-# or
-#./remove_superfluous_trp.py -in:file:silent my.silent
+# Exploder step 3: designs the region around the HIS networks using MPNN conditional probabilities.
+#
+# Usage: ./his_ph_exploder_design_v2.py pdb1.pdb pdb2.pdb --list_of_mpnn_prob_npz probs.list [--modes regular,force_touching] [--two_sided_design]
+#    or: ./his_ph_exploder_design_v2.py -in:file:silent my.silent --list_of_mpnn_prob_npz probs.list [--modes regular,force_touching] [--two_sided_design]
 
 import os
 import sys
 import math
 
-import distutils.spawn
 import os
 import sys
-#sys.path.append(os.path.dirname(distutils.spawn.find_executable("silent_tools.py")))
 #import silent_tools
 
 from pyrosetta import *
 from pyrosetta.rosetta import *
 
-sys.path.append("/home/bcov/sc/random/npose")
 import npose_util_pyrosetta as nup
 import npose_util as nu
 
@@ -1112,8 +1108,15 @@ def worst_possible_asp(pose, name_no_suffix, out_score_map, out_string_map, suff
 
     mpnn_file = mpnn_npz_paths[name_no_suffix]
     asdf = np.load(mpnn_file)
-    mpnn_probs = asdf['odds'][0]
-    alphabet = str(asdf['alphabet'])
+    if 'odds' in asdf.files:
+        mpnn_probs = asdf['odds'][0]
+        alphabet = str(asdf['alphabet'])
+    else:
+        # Stock ProteinMPNN (--conditional_probs_only 1) only writes log_p and S.
+        # odds = log_p of each aa minus log_p of the aa that is in the input pdb
+        alphabet = 'ACDEFGHIKLMNPQRSTVWYX'
+        log_p = asdf['log_p'][0]
+        mpnn_probs = log_p - log_p[np.arange(len(log_p)), asdf['S']][:,None]
 
     mpnn_probs[:,alphabet.index('C')] = -1000
     mpnn_probs[:,alphabet.index('X')] = -1000

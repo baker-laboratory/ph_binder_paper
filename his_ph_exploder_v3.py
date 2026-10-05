@@ -1,26 +1,22 @@
 #!/usr/bin/env python
 from __future__ import division
 
-# This program accepts arguments like this:
-
-#./remove_superfluous_trp.py pdb1.pdb pdb2.pdb pdb3.pdb
-# or
-#./remove_superfluous_trp.py -in:file:silent my.silent
+# Exploder step 1: finds h-bonding HIS pairs (or HIS next to R/K) that can be placed in the binder.
+#
+# Usage: ./his_ph_exploder_v3.py pdb1.pdb pdb2.pdb [--other_aas RK] [--interface_mode] [--two_sided_design] [--dist_cutoff_mode A] [--only_allow_positions 1,2,3]
+#    or: ./his_ph_exploder_v3.py -in:file:silent my.silent [--other_aas RK] [--interface_mode] [--two_sided_design] [--dist_cutoff_mode A] [--only_allow_positions 1,2,3]
 
 import os
 import sys
 import math
 
-import distutils.spawn
 import os
 import sys
-#sys.path.append(os.path.dirname(distutils.spawn.find_executable("silent_tools.py")))
 #import silent_tools
 
 from pyrosetta import *
 from pyrosetta.rosetta import *
 
-sys.path.append("/home/bcov/sc/random/npose")
 import npose_util_pyrosetta as nup
 import npose_util as nu
 
@@ -35,10 +31,12 @@ import re
 
 import pandas as pd
 
-def _hbedge_from_lowmem(hb_graph, lowmem_edge):
-    if hasattr(hb_graph, 'HBondEdge_from_LowMemEdge'):
+def _hbedge_from_lowmem(hb_graph, lowmem_edge, node_ind):
+    # The edge list iterates over LowMemEdges. We need the full HBondEdge (with the hbonds).
+    if hasattr(hb_graph, 'HBondEdge_from_LowMemEdge'):  # pyrosetta with the hbond graph patch
         return hb_graph.HBondEdge_from_LowMemEdge(lowmem_edge)
-    return core.scoring.hbonds.graph.HBondEdge_from_LowMemEdge(lowmem_edge)
+    # Published pyrosetta: look the full edge up from its two node indices
+    return hb_graph.find_edge(node_ind, lowmem_edge.get_other_ind(node_ind))
 
 # import pyRMSD.RMSDCalculator
 
@@ -54,8 +52,8 @@ parser.add_argument("-in:file:silent", type=str, default="")
 parser.add_argument("pdbs", type=str, nargs="*")
 parser.add_argument("--other_aas", default='')
 parser.add_argument("--only_allow_positions", default='', help='comma separated list of positions 1-indexed we can mutate')
-parser.add_argument("--interface_mode", default='', help='Only allow h-bonds that cross the A/B interface')
-parser.add_argument("--two_sided_design", default='', help='Allow the target to mutate')
+parser.add_argument("--interface_mode", action='store_true', help='Only allow h-bonds that cross the A/B interface')
+parser.add_argument("--two_sided_design", action='store_true', help='Allow the target to mutate')
 parser.add_argument("--dist_cutoff_mode", type=float, default=-1, help='Instead of looking for h-bonds, '
                                                                             'the sidechains must have non-C atoms within this many A')
 
@@ -841,8 +839,16 @@ def find_his_hbond_pairs(pose, interface_mode=False, two_sided_design=False, dis
         restrict_aa = core.pack.task.operation.RestrictAbsentCanonicalAASRLT()
         restrict_aa.aas_to_keep( 'H' + args.other_aas )
         subset = chainB.apply(pose)
+        # Disulfide cysteines can't be designed and would end up with no rotamers (which breaks the hbond graph),
+        #  so only repack them
+        disulfide_subset = utility.vector1_bool(pose.size())
+        for seqpos in range(1, pose.size()+1):
+            if pose.residue(seqpos).type().is_disulfide_bonded():
+                disulfide_subset[seqpos] = True
+                subset[seqpos] = False
+        tf.push_back( core.pack.task.operation.OperateOnResidueSubset( core.pack.task.operation.RestrictToRepackingRLT(), disulfide_subset ) )
         tf.push_back( core.pack.task.operation.OperateOnResidueSubset( restrict_aa, subset ) )
-        
+
 
     restrict_aa = core.pack.task.operation.RestrictAbsentCanonicalAASRLT()
     restrict_aa.aas_to_keep( 'H' + args.other_aas )
@@ -895,7 +901,7 @@ def find_his_hbond_pairs(pose, interface_mode=False, two_sided_design=False, dis
 
         it = hbnode.edge_list_begin( hb_graph )
         while it.valid():
-            edge = _hbedge_from_lowmem(hb_graph, it.dereference())
+            edge = _hbedge_from_lowmem(hb_graph, it.dereference(), ihbnode)
             it.pre_increment()
 
             we_are_first = edge.get_first_node_ind() == ihbnode

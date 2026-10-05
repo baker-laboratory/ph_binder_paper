@@ -1,26 +1,22 @@
 #!/usr/bin/env python
 from __future__ import division
 
-# This program accepts arguments like this:
-
-#./remove_superfluous_trp.py pdb1.pdb pdb2.pdb pdb3.pdb
-# or
-#./remove_superfluous_trp.py -in:file:silent my.silent
+# Exploder step 7 (optional): FastRelax at low and high pH and compare energies.
+#
+# Usage: ./his_ph_exploder_energy_evaluate.py pdb1.pdb pdb2.pdb [--nstruct 3]
+#    or: ./his_ph_exploder_energy_evaluate.py -in:file:silent my.silent [--nstruct 3]
 
 import os
 import sys
 import math
 
-import distutils.spawn
 import os
 import sys
-#sys.path.append(os.path.dirname(distutils.spawn.find_executable("silent_tools.py")))
 #import silent_tools
 
 from pyrosetta import *
 from pyrosetta.rosetta import *
 
-sys.path.append("/home/bcov/sc/random/npose")
 import npose_util_pyrosetta as nup
 import npose_util as nu
 
@@ -133,7 +129,7 @@ fr_cart_fast_xml = f'''
     <FastRelax name="FastRelax" scorefxn="sfxn_relax" repeats="1" batch="false" 
     ramp_down_constraints="false" cartesian="true" bondangle="false" bondlength="false" 
     min_type="dfpmin_armijo_nonmonotone" task_operations="current,restrict_target_not_interface,ex1_ex2" 
-    relaxscript="/mnt/home/bcov/sc/polish/scripts/files/fast_cart.wts" >
+    relaxscript="{os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fast_cart.wts')}" >
 
         <MoveMap name="MM"  >
             <Chain number="1" chi="true" bb="true" />

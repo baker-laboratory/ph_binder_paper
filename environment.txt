@@ -1,7 +1,22 @@
-npose from github
+# Tested with python 3.12 and numpy 2.x:
+#   conda create -n his_ph python=3.12
+#   pip install npose scipy numpy numba pandas biopython
+# plus PyRosetta (not on pip, see the install instructions at https://www.pyrosetta.org)
+
+pyrosetta (published release; tested with 2026.06)
+npose >= 1.1 (pip install npose). 1.0 is missing nu.superposition_rmsd and breaks under numpy 2
 scipy
 numpy
 numba
-pyrosetta hacked version
 pandas
+biopython (only his_ph_exploder_energy_evaluate.py; uses Bio.pairwise2)
 
+# External tools, NOT part of this environment
+ProteinMPNN, included as a git submodule in ProteinMPNN/ (https://github.com/dauparas/ProteinMPNN, MIT license, pinned to
+    commit 8907e66). Get it with `git clone --recursive` or `git submodule update --init`. It needs torch, which can
+    be installed in this same environment (tested: python 3.12, numpy 2.5, CPU torch 2.14) or in a separate one.
+    Set OMP_NUM_THREADS=1, it is fastest. Used by:
+    exploder step 3: you run ProteinMPNN/protein_mpnn_run.py yourself, see readme_stuff/wiki.md
+    his_ph_interface_design.py: called as an external program, found automatically in ProteinMPNN/ (or set
+        PROTEIN_MPNN_PATH). If torch lives in another environment set PROTEIN_MPNN_PYTHON. See his_ph_interface_mpnn.py
+An oracle such as AF2 / AF3 (exploder step 4, interface pipeline step 2)
