@@ -1,0 +1,7 @@
+npose from github
+scipy
+numpy
+numba
+pyrosetta hacked version
+pandas
+
