@@ -1,4 +1,4 @@
-# his_ph: pH-dependent protein binders with histidines
+# pH-dependent protein binders with histidines
 
 Scripts for turning existing protein binders into pH-dependent binders by placing histidines (HIS).
 
@@ -7,7 +7,7 @@ From our paper, we described two separate ways to create pH dependence:
 * One where the binder structure is disrupted at low pH. We internally termed this the "his_ph_exploder" pipeline, and it can be found in the [exploder pipeline](#exploder-pipeline) section.
 * The other is described as "his_ph_interface" ([interface pipeline](#interface-pipeline)) and works by creating cross-interface features that are destabilized at low pH.
 
-The two pipelines are separate. Pick one (or run both and order designs from each).
+The two pipelines are separate but may be combined on the same design if you want.
 
 ## Installation
 
@@ -234,8 +234,6 @@ Main options:
 | `-min_his_score` | 5 | Minimum pH score to output |
 | `-num_per_input` | 20 | Maximum outputs per input |
 | `-mpnn_seqs`, `-mpnn_temps` | 1, `"0.001 0.01 0.1"` | ProteinMPNN sampling |
-| `-neg_netc_bias_level`, `-surface_ala_weight`, `-interface_desap_sap`, `-interface_desap_bcov` | 0, -0.75, 0, 0 | Per-position ProteinMPNN biases |
-| `-sap_limit`, `-do_monomer_filter` | | Filters on the designed binder |
 | `-hbnet_lock_identities`, `-hbnet_lock_identities_strict` | off | Lock the identities of residues in the existing h-bond network |
 
 Run `python his_ph_interface_design.py -h` for the rest.
